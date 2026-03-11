@@ -1,4 +1,4 @@
-/* Copyright 2018 The Bazel Authors. All rights reserved.
+/* Copyright 2026 The Bazel Authors. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -331,6 +331,10 @@ func MergeDict(srcExpr, dstExpr bzl.Expr) (*bzl.DictExpr, error) {
 				e.mergedValue = &bzl.ListExpr{}
 			}
 		} else if e.mergedValue != nil {
+			keys = append(keys, e.key)
+		} else if e.srcValue != nil && len(e.srcValue.List) == 0 {
+			// Keep explicit empty list.
+			e.mergedValue = &bzl.ListExpr{}
 			keys = append(keys, e.key)
 		}
 	}
