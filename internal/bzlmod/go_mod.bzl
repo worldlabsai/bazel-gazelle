@@ -80,6 +80,8 @@ def parse_go_work(content, go_work_label):
                 state["use"].append(tokens[0])
             elif current_directive == "replace":
                 _parse_replace_directive(state, tokens, go_work_label.name, line_no)
+            elif current_directive == "godebug":
+                pass
             else:
                 fail("{}:{}: unexpected directive '{}'".format(go_work_label.name, line_no, current_directive))
         elif tokens[0] == "go":
@@ -99,7 +101,11 @@ def parse_go_work(content, go_work_label):
                 continue
             else:
                 state["use"].append(tokens[1])
-        elif tokens[0] == "toolchain":
+        elif tokens[0] in ("toolchain", "ignore"):
+            continue
+        elif tokens[0] == "godebug":
+            if tokens[1] == "(":
+                current_directive = tokens[0]
             continue
         else:
             fail("{}:{}: unexpected directive '{}'".format(go_work_label.name, line_no, tokens[0]))
@@ -107,7 +113,7 @@ def parse_go_work(content, go_work_label):
     major, minor = go.split(".")[:2]
 
     go_mods = [use_spec_to_label(go_work_label.repo_name, use) for use in state["use"]]
-    from_file_tags = [struct(go_mod = go_mod, _is_dev_dependency = False) for go_mod in go_mods]
+    from_file_tags = [struct(go_mod = go_mod, _is_dev_dependency = False, _from_go_work = True) for go_mod in go_mods]
 
     module_tags = [struct(version = mod.version, path = mod.to_path, _parent_label = go_work_label, local_path = mod.local_path, indirect = False) for mod in state["replace"].values()]
 
@@ -161,7 +167,7 @@ def deps_from_go_mod(module_ctx, go_mod_label):
         go_mod_label: a Label for a `go.mod` file.
 
     Returns:
-        a tuple (Go module path, deps, replace map), where deps is a list of structs representing
+        a tuple (Go module path, deps, replace map, tools), where deps is a list of structs representing
         `require` statements from the go.mod file.
     """
     _check_go_mod_name(go_mod_label.name)
@@ -186,7 +192,7 @@ def deps_from_go_mod(module_ctx, go_mod_label):
             _parent_label = go_mod_label,
         ))
 
-    return go_mod.module, deps, go_mod.replace_map, go_mod.module
+    return go_mod.module, deps, go_mod.replace_map, go_mod.tool
 
 def parse_go_mod(content, path):
     # See https://go.dev/ref/mod#go-mod-file.
@@ -201,6 +207,7 @@ def parse_go_mod(content, path):
         "go": None,
         "require": [],
         "replace": {},
+        "tool": [],
     }
 
     current_directive = None
@@ -210,7 +217,7 @@ def parse_go_mod(content, path):
             continue
 
         if not current_directive:
-            if tokens[0] not in ["module", "go", "require", "replace", "exclude", "retract", "toolchain", "tool"]:
+            if tokens[0] not in ["module", "go", "require", "replace", "exclude", "retract", "toolchain", "tool", "godebug", "ignore"]:
                 fail("{}:{}: unexpected token '{}' at start of line".format(path, line_no, tokens[0]))
             if len(tokens) == 1:
                 fail("{}:{}: expected another token after '{}'".format(path, line_no, tokens[0]))
@@ -255,6 +262,7 @@ def parse_go_mod(content, path):
         go = (int(major), int(minor)),
         require = tuple(state["require"]),
         replace_map = state["replace"],
+        tool = tuple(state["tool"]),
     )
 
 def _parse_directive(state, directive, tokens, comment, path, line_no):
@@ -274,6 +282,10 @@ def _parse_directive(state, directive, tokens, comment, path, line_no):
         ))
     elif directive == "replace":
         _parse_replace_directive(state, tokens, path, line_no)
+    elif directive == "tool":
+        if len(tokens) != 1:
+            fail("{}:{}: expected module path in 'tool' directive".format(path, line_no))
+        state["tool"].append(tokens[0])
 
     # TODO: Handle exclude.
 
@@ -392,34 +404,39 @@ def sums_from_go_mod(module_ctx, go_mod_label):
     return parse_sumfile(module_ctx, go_mod_label, "go.sum")
 
 def sums_from_go_work(module_ctx, go_work_label):
-    """Loads the entries from a go.work.sum file given a go.work label.
+    """Loads the entries from a go.work.sum file given a go work file label.
 
     Args:
         module_ctx: a https://bazel.build/rules/lib/module_ctx object
             passed from the MODULE.bazel call.
-        go_work_label: a Label for a `go.work` file. This label is used
-            to find the associated `go.work.sum` file.
+        go_work_label: a Label for a go work file. The sum file is located
+            at `<go_work_label.name>.sum` in the same package, matching
+            the convention used by the go command.
 
     Returns:
         A Dict[(string, string) -> (string)] is returned where each entry
         is defined by a Go Module's sum:
             (path, version) -> (sum)
     """
-    _check_go_work_name(go_work_label.name)
 
-    # next we need to test if the go.work.sum file exists, this is a little tricky so we use an indirect approach:
+    # The go command accepts any file name via GOWORK and writes checksums
+    # to a sibling file with a .sum suffix, so derive the sum file name from
+    # the work file name rather than hardcoding go.work.sum.
+    sum_file_name = go_work_label.name + ".sum"
+
+    # next we need to test if the sum file exists, this is a little tricky so we use an indirect approach:
 
     # 1. convert go_work_label into a path
     go_work_path = module_ctx.path(go_work_label)
 
-    # 2. use the go_work_path to create a path for the heisen go.work.sum file
-    maybe_go_work_sum_path = go_work_path.dirname.get_child("go.work.sum")
+    # 2. use the go_work_path to create a path for the heisen sum file
+    maybe_go_work_sum_path = go_work_path.dirname.get_child(sum_file_name)
 
     # 3. check for its existence
     if maybe_go_work_sum_path.exists:
-        return parse_sumfile(module_ctx, go_work_label, "go.work.sum")
+        return parse_sumfile(module_ctx, go_work_label, sum_file_name)
     else:
-        # 4. if go.work.sum does not exist, we should watch it in case it appears in the future
+        # 4. if the sum file does not exist, we should watch it in case it appears in the future
         if hasattr(module_ctx, "watch"):
             # module_ctx.watch_tree is only available in bazel >= 7.1
             module_ctx.watch(maybe_go_work_sum_path)
@@ -441,20 +458,29 @@ def parse_sumfile(module_ctx, label, sumfile):
 
 def parse_go_sum(content):
     hashes = {}
+    saw_git_conflict = False
     for line in content.splitlines():
+        # Merge conflicts in go.sum files can be solved by taking the union of
+        # the entries, so we simply ignore the conflict markers and keep
+        # going. This ensures that the build doesn't fail due to missing
+        # hashes.
+        if line.startswith("<<<<<<<") or line.startswith("=======") or line.startswith(">>>>>>>"):
+            saw_git_conflict = True
+            continue
         path, version, sum = line.split(" ")
         version = _canonicalize_raw_version(version)
         if not version.endswith("/go.mod"):
             hashes[(path, version)] = sum
+    if saw_git_conflict:
+        print("""\
+Warning: go.sum file contained git conflict markers. Consider adding \
+'go.sum merge=union' to your .gitattributes file to resolve them \
+automatically.""")
     return hashes
 
 def _check_go_mod_name(name):
     if name != "go.mod":
         fail("go_deps.from_file requires a 'go.mod' file, not '{}'".format(name))
-
-def _check_go_work_name(name):
-    if name != "go.work":
-        fail("go_deps.from_file requires a 'go.work' file, not '{}'".format(name))
 
 def _canonicalize_raw_version(raw_version):
     if raw_version.startswith("v"):

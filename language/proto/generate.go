@@ -24,6 +24,7 @@ import (
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
+	"github.com/bazelbuild/bazel-gazelle/merger"
 	"github.com/bazelbuild/bazel-gazelle/pathtools"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
@@ -73,6 +74,15 @@ func (*protoLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	var res language.GenerateResult
 	for _, pkg := range pkgs {
 		r := generateProto(pc, args.Rel, pkg, shouldSetVisibility)
+		if args.File != nil {
+			// If matching rule already exists, use its name for generated rule, otherwise other languages may not be able to resolve proto_library rule.
+			// This way we can propagate the name that would actually written to the BUILD file.
+			// Most of downstream extensions would refer to this name directly when generating `<lang>_proto_library`.
+			previous, err := merger.Match(args.File.Rules, r, protoKinds["proto_library"], c.AliasMap)
+			if err == nil && previous != nil {
+				r.SetName(previous.Name())
+			}
+		}
 		if r.IsEmpty(protoKinds[r.Kind()]) {
 			res.Empty = append(res.Empty, r)
 		} else {
@@ -87,14 +97,15 @@ func (*protoLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		res.Imports[i] = r.PrivateAttr(config.GazelleImportsKey)
 	}
 	res.Empty = append(res.Empty, generateEmpty(args.File, regularProtoFiles, genProtoFiles)...)
+	res.RelsToIndex = buildRelsToIndex(pc, pkgs)
 	return res
 }
 
 // RuleName returns a name for a proto_library derived from the given strings.
 // For each string, RuleName will look for a non-empty suffix of identifier
 // characters and then append "_proto" to that.
+// It replaces non-identifier characters with underscores.
 func RuleName(names ...string) string {
-	base := "root"
 	for _, name := range names {
 		notIdent := func(c rune) bool {
 			return !('A' <= c && c <= 'Z' ||
@@ -102,15 +113,31 @@ func RuleName(names ...string) string {
 				'0' <= c && c <= '9' ||
 				c == '_')
 		}
-		if i := strings.LastIndexFunc(name, notIdent); i >= 0 {
+		// If name is explicit package name, e.g. `example.com/protos/foo;package_name` use package name instead of import path
+		if i := strings.LastIndexAny(name, `;`); i != -1 {
 			name = name[i+1:]
 		}
-		if name != "" {
-			base = name
-			break
+		// If name is a path, take only the last segment
+		if i := strings.LastIndexAny(name, `/\\.`); i != -1 {
+			name = name[i+1:]
+		}
+		// Replace illegal characters with underscores
+		var b strings.Builder
+		for _, r := range name {
+			if notIdent(r) {
+				b.WriteRune('_')
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		base := strings.Trim(b.String(), "_")
+		// Skip if empty or only underscores
+		if base != "" {
+			return base + "_proto"
 		}
 	}
-	return base + "_proto"
+	// Default name if no valid identifier was found
+	return "root_proto"
 }
 
 // buildPackage extracts metadata from the .proto files in a directory and
@@ -308,4 +335,34 @@ outer:
 		empty = append(empty, rule.NewRule("proto_library", r.Name()))
 	}
 	return empty
+}
+
+// buildRelsToIndex transforms the import statements read from proto files in the current directory
+// into a list of repo-root-relative directory paths to lazily index.
+func buildRelsToIndex(pc *ProtoConfig, packages []*Package) []string {
+	dirSet := make(map[string]bool)
+
+	for _, pkg := range packages {
+		for importStr := range pkg.Imports {
+			for _, search := range pc.protoSearch {
+				transformedRel, ok := transformImport("", importStr, search.stripImportPrefix, search.importPrefix)
+				if !ok {
+					continue
+				}
+				dir := path.Dir(transformedRel)
+				if dir == "." {
+					dir = ""
+				}
+				dirSet[dir] = true
+			}
+		}
+	}
+
+	dirs := make([]string, 0, len(dirSet))
+	for dir := range dirSet {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+
+	return dirs
 }

@@ -914,11 +914,7 @@ func (r *Rule) Attr(key string) bzl.Expr {
 // AttrString returns the value of the named attribute if it is a scalar string.
 // "" is returned if the attribute is not set or is not a string.
 func (r *Rule) AttrString(key string) string {
-	attr, ok := r.attrs[key]
-	if !ok {
-		return ""
-	}
-	str, ok := attr.expr.RHS.(*bzl.StringExpr)
+	str, ok := r.Attr(key).(*bzl.StringExpr)
 	if !ok {
 		return ""
 	}
@@ -929,11 +925,7 @@ func (r *Rule) AttrString(key string) string {
 // nil is returned if the attribute is not set or is not a list. Non-string
 // values within the list won't be returned.
 func (r *Rule) AttrStrings(key string) []string {
-	attr, ok := r.attrs[key]
-	if !ok {
-		return nil
-	}
-	list, ok := attr.expr.RHS.(*bzl.ListExpr)
+	list, ok := r.Attr(key).(*bzl.ListExpr)
 	if !ok {
 		return nil
 	}
@@ -944,6 +936,16 @@ func (r *Rule) AttrStrings(key string) []string {
 		}
 	}
 	return strs
+}
+
+// AttrBool returns the value of the rule attribute key as a bool. Returns true
+// if and only if the attribute is explicitly set to True keyword. In all other
+// cases, including unset attribute or unexpected attribute type, returns false.
+// Notice that for unset attributes with default True value, this check is
+// insufficient and should be preceded by `r.Attr(key) == nil` check.
+func (r *Rule) AttrBool(key string) bool {
+	ident, ok := r.Attr(key).(*bzl.Ident)
+	return ok && ident.Name == "True"
 }
 
 // DelAttr removes the named attribute from the rule.
@@ -1118,16 +1120,41 @@ func (r *Rule) sync() {
 	r.updated = false
 }
 
+func isKeepComment(c bzl.Comment) bool {
+	text := strings.TrimSpace(strings.TrimPrefix(c.Token, "#"))
+	return text == "keep" || strings.HasPrefix(text, "keep: ")
+}
+
 // ShouldKeep returns whether e is marked with a "# keep" comment. Kept
 // expressions should not be removed or modified.
 func ShouldKeep(e bzl.Expr) bool {
 	for _, c := range append(e.Comment().Before, e.Comment().Suffix...) {
-		text := strings.TrimSpace(strings.TrimPrefix(c.Token, "#"))
-		if text == "keep" || strings.HasPrefix(text, "keep: ") {
+		isKeep := isKeepComment(c)
+		if isKeep {
 			return true
 		}
 	}
 	return false
+}
+
+// removeKeep removes the keep comments from the expression.
+func removeKeep(e bzl.Expr) bzl.Comments {
+	comments := bzl.Comments{
+		After: e.Comment().After,
+	}
+	for _, c := range e.Comment().Before {
+		isKeep := isKeepComment(c)
+		if !isKeep {
+			comments.Before = append(comments.Before, c)
+		}
+	}
+	for _, c := range e.Comment().Suffix {
+		isKeep := isKeepComment(c)
+		if !isKeep {
+			comments.Suffix = append(comments.Suffix, c)
+		}
+	}
+	return comments
 }
 
 // CheckInternalVisibility overrides the given visibility if the package is

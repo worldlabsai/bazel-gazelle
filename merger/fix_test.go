@@ -70,13 +70,17 @@ func TestFixLoads(t *testing.T) {
 		"correct": {
 			input: `load("@foo", "foo_binary", "foo_library")
 
-foo_binary(name = "a")
+maybe = "foo_name"
+
+foo_binary(name = maybe)
 
 foo_library(name = "a_lib")
 `,
 			want: `load("@foo", "foo_binary", "foo_library")
 
-foo_binary(name = "a")
+maybe = "foo_name"
+
+foo_binary(name = maybe)
 
 foo_library(name = "a_lib")
 `,
@@ -249,6 +253,21 @@ load("@foo", "foo_binary")
 foo_binary(
     name = "a",
     field = magic_macro,
+)
+`,
+		},
+		"assignment expr rhs list": {
+    		input: `foo_binary(
+    name = "a",
+    field = [magic_macro],
+)
+`,
+    		want: `load("@bar", "magic_macro")
+load("@foo", "foo_binary")
+
+foo_binary(
+    name = "a",
+    field = [magic_macro],
 )
 `,
 		},

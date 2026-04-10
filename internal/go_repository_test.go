@@ -17,6 +17,7 @@ package bazel_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,18 @@ package main
 
 func main() {}
 `,
+	WorkspacePrefix: `
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "io_bazel_rules_go",
+    sha256 = "9d72f7b8904128afb98d46bbef82ad7223ec9ff3718d419afb355fddd9f9484a",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazel-contrib/rules_go/releases/download/v0.55.1/rules_go-v0.55.1.zip",
+        "https://github.com/bazel-contrib/rules_go/releases/download/v0.55.1/rules_go-v0.55.1.zip",
+    ],
+)
+`,
 	WorkspaceSuffix: `
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies", "go_repository")
 
@@ -62,6 +75,7 @@ gazelle_dependencies(
 		"GOPRIVATE": "example.com/m",
 		"GOSUMDB": "off",
 	},
+	go_env_inherit = ["GAZELLE_INHERITED_TOKEN"],
 )
 
 # gazelle:repo test
@@ -90,27 +104,33 @@ go_repository(
 )
 
 go_repository(
-		name = "com_github_apex_log",
-		build_directives = ["gazelle:exclude handlers"],
-		importpath = "github.com/apex/log",
-		sum = "h1:J5rld6WVFi6NxA6m8GJ1LJqu3+GiTFIt3mYv27gdQWI=",
-		version = "v1.1.0",
+    name = "com_github_apex_log",
+    build_directives = [
+        "gazelle:exclude handlers",
+        "gazelle:default_visibility @com_github_apex_log//:__subpackages__",
+    ],
+    importpath = "github.com/apex/log",
+    sum = "h1:J5rld6WVFi6NxA6m8GJ1LJqu3+GiTFIt3mYv27gdQWI=",
+    version = "v1.1.0",
 )
 `,
 }
 
 func TestMain(m *testing.M) {
+	if err := os.Setenv("GAZELLE_INHERITED_TOKEN", "top-secret-token"); err != nil {
+		panic(err)
+	}
 	bazel_testing.TestMain(m, testArgs)
 }
 
 func TestBuild(t *testing.T) {
-	if err := bazel_testing.RunBazel("build", "@errors_go_git//:errors", "@errors_go_mod//:go_default_library"); err != nil {
+	if err := bazel_testing.RunBazel("build", "--enable_workspace", "@errors_go_git//:errors", "@errors_go_mod//:go_default_library"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestDirectives(t *testing.T) {
-	err := bazel_testing.RunBazel("query", "@com_github_apex_log//handlers/...")
+func TestExcludeDirective(t *testing.T) {
+	err := bazel_testing.RunBazel("query", "--enable_workspace", "@com_github_apex_log//handlers/...")
 	if err == nil {
 		t.Fatal("Should not generate build files for @com_github_apex_log//handlers/...")
 	}
@@ -119,8 +139,41 @@ func TestDirectives(t *testing.T) {
 	}
 }
 
+func TestDefaultVisibilityDirective(t *testing.T) {
+	output, err := bazel_testing.BazelOutput("query", "--output=streamed_jsonproto", "--enable_workspace", "@com_github_apex_log//:log")
+	if err != nil {
+		t.Fatalf("bazel query failed: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(output), []byte("\n"))
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines of query output; want 1", len(lines))
+	}
+	var target struct {
+		Rule struct {
+			Attribute []struct {
+				Name            string   `json:"name"`
+				StringListValue []string `json:"stringListValue"`
+			} `json:"attribute"`
+		} `json:"rule"`
+	}
+	if err := json.Unmarshal(lines[0], &target); err != nil {
+		t.Fatalf("decoding streamed_jsonproto: %v", err)
+	}
+	var visibilities []string
+	for _, attr := range target.Rule.Attribute {
+		if attr.Name == "visibility" {
+			visibilities = append(visibilities, attr.StringListValue...)
+		}
+	}
+	got := strings.Join(visibilities, ",")
+	want := "@com_github_apex_log//:__subpackages__"
+	if got != want {
+		t.Errorf("got visibility %s; want %s", got, want)
+	}
+}
+
 func TestRepoConfig(t *testing.T) {
-	if err := bazel_testing.RunBazel("build", "@bazel_gazelle_go_repository_config//:all"); err != nil {
+	if err := bazel_testing.RunBazel("build", "--enable_workspace", "@bazel_gazelle_go_repository_config//:all"); err != nil {
 		t.Fatal(err)
 	}
 	outputBase, err := getBazelOutputBase()
@@ -150,6 +203,14 @@ go_repository(
     importpath = "github.com/pkg/errors",
 )
 
+http_archive(
+    name = "io_bazel_rules_go",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazel-contrib/rules_go/releases/download/v0.55.1/rules_go-v0.55.1.zip",
+        "https://github.com/bazel-contrib/rules_go/releases/download/v0.55.1/rules_go-v0.55.1.zip",
+    ],
+)
+
 go_repository(
     name = "org_golang_x_xerrors",
     importpath = "golang.org/x/xerrors",
@@ -160,7 +221,7 @@ go_repository(
 }
 
 func TestModcacheRW(t *testing.T) {
-	if err := bazel_testing.RunBazel("query", "@errors_go_mod//:go_default_library"); err != nil {
+	if err := bazel_testing.RunBazel("query", "--enable_workspace", "@errors_go_mod//:go_default_library"); err != nil {
 		t.Fatal(err)
 	}
 	out, err := bazel_testing.BazelOutput("info", "output_base")
@@ -179,7 +240,7 @@ func TestModcacheRW(t *testing.T) {
 }
 
 func TestRepoCacheContainsGoEnv(t *testing.T) {
-	if err := bazel_testing.RunBazel("query", "@errors_go_mod//:go_default_library"); err != nil {
+	if err := bazel_testing.RunBazel("query", "--enable_workspace", "@errors_go_mod//:go_default_library"); err != nil {
 		t.Fatal(err)
 	}
 	outputBase, err := getBazelOutputBase()
@@ -191,10 +252,23 @@ func TestRepoCacheContainsGoEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not read file %s: %v", goEnvPath, err)
 	}
-	for _, want := range []string{"GOPRIVATE='example.com/m'", "GOSUMDB='off'"} {
+	for _, want := range []string{
+		"GOPRIVATE='example.com/m'",
+		"GOSUMDB='off'",
+		"GAZELLE_INHERITED_TOKEN='top-secret-token'",
+	} {
 		if !strings.Contains(string(gotBytes), want) {
 			t.Fatalf("go.env did not contain %s", want)
 		}
+	}
+
+	goEnvBzlPath := filepath.Join(outputBase, "external/bazel_gazelle_go_repository_config", "go_env.bzl")
+	goEnvBzl, err := os.ReadFile(goEnvBzlPath)
+	if err != nil {
+		t.Fatalf("could not read file %s: %v", goEnvBzlPath, err)
+	}
+	if !strings.Contains(string(goEnvBzl), "\"GAZELLE_INHERITED_TOKEN\": \"top-secret-token\"") {
+		t.Fatalf("go_env.bzl did not contain inherited GAZELLE_INHERITED_TOKEN")
 	}
 }
 

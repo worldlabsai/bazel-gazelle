@@ -46,6 +46,7 @@ type goPackage struct {
 type goTarget struct {
 	sources, embedSrcs, imports, cppopts, copts, cxxopts, clinkopts platformStringsBuilder
 	cgo, hasInternalTest                                            bool
+	pgoprofile                                                      string
 }
 
 // protoTarget contains information used to generate a go_proto_library rule.
@@ -105,10 +106,14 @@ func (pkg *goPackage) addFile(c *config.Config, er *embedResolver, info fileInfo
 			// from information emitted by the proto language extension.
 			pkg.proto.addFile(info)
 		}
-	case info.isTest:
-		if info.isCgo {
-			return fmt.Errorf("%s: use of cgo in test not supported", info.path)
+	case info.ext == pgoExt:
+		if info.name == "default.pgo" {
+			// Only use auto-include the *.pgo file if it is "default.pgo", as this file
+			// would be used by `go build` if `-pgo` is not specified.
+			// See https://pkg.go.dev/cmd/go for more details.
+			pkg.binary.pgoprofile = info.name
 		}
+	case info.isTest:
 		if getGoConfig(c).testMode == fileTestMode || len(pkg.tests) == 0 {
 			pkg.tests = append(pkg.tests, goTarget{})
 		}

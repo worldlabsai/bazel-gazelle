@@ -137,6 +137,7 @@ def _go_repository_impl(ctx):
         gazelle_path = ctx.path(Label(_gazelle))
         watch(ctx, gazelle_path)
 
+    reproducible = False
     if ctx.attr.local_path:
         if hasattr(ctx, "watch_tree"):
             # https://github.com/bazelbuild/bazel/commit/fffa0affebbacf1961a97ef7cd248be64487d480
@@ -165,15 +166,20 @@ def _go_repository_impl(ctx):
                 path = ctx.attr.importpath,
                 sha256 = result.sha256,
             ))
+        else:
+            reproducible = True
         fetch_repo_args = ["-dest", ctx.path(""), "-no-fetch"]
     elif ctx.attr.commit or ctx.attr.tag:
         # repository mode
         if ctx.attr.commit:
             rev = ctx.attr.commit
             rev_key = "commit"
+            reproducible = True
         elif ctx.attr.tag:
             rev = ctx.attr.tag
             rev_key = "tag"
+            # Not reproducible, tags can change.
+
         for key in ("urls", "strip_prefix", "type", "sha256", "version", "sum", "replace", "canonical_id"):
             if getattr(ctx.attr, key):
                 fail("cannot specify both %s and %s" % (rev_key, key), key)
@@ -198,6 +204,7 @@ def _go_repository_impl(ctx):
                 fail("No sum for {}@{} found, update go.sum with:\n  bazel run".format(ctx.attr.importpath, ctx.attr.version), Label("@io_bazel_rules_go//go"), "-- mod tidy")
             else:
                 fail("if version is specified, sum must also be")
+        reproducible = True
 
         fetch_path = ctx.attr.replace if ctx.attr.replace else ctx.attr.importpath
         fetch_repo_args = [
@@ -270,7 +277,7 @@ def _go_repository_impl(ctx):
 
     # Clean existing build files if requested
     if ctx.attr.build_file_generation == "clean":
-        fetch_repo_args += ["-clean"]
+        fetch_repo_args.append("-clean")
 
     # Disable sumdb in fetch_repo. In module mode, the sum is a mandatory
     # attribute of go_repository, so we don't need to look it up.
@@ -374,7 +381,12 @@ def _go_repository_impl(ctx):
         repo_file = ctx.path("REPO.bazel")
         if not repo_file.exists:
             ctx.file("REPO.bazel", """\
-repo(default_package_metadata = ["//:gazelle_generated_package_info"])
+repo(
+    default_package_metadata = [
+        "//:gazelle_generated_package_info",
+        "//:package_metadata",
+    ],
+)
 """)
 
             # Modify the top-level build file after patches have been applied as the
@@ -390,6 +402,9 @@ repo(default_package_metadata = ["//:gazelle_generated_package_info"])
             )
             ctx.file(build_file_name, build_file_content)
 
+    if reproducible and hasattr(ctx, "repo_metadata"):
+        return ctx.repo_metadata(reproducible = True)
+
 def _generate_package_info(*, importpath, version):
     package_name = importpath
 
@@ -400,13 +415,27 @@ def _generate_package_info(*, importpath, version):
     # See specification:
     # https://github.com/package-url/purl-spec/blob/master/PURL-TYPES.rst#golang
     # scheme:type/namespace/name@version?qualifiers#subpath
-    purl = "pkg:golang/{namespace_and_name}@{version}".format(
-        namespace_and_name = importpath,
-        version = version,
-    ) if version else None
+    if version:
+        purl = "pkg:golang/{namespace_and_name}@{version}".format(
+            namespace_and_name = importpath,
+            version = version,
+        )
+    else:
+        purl = "pkg:golang/{namespace_and_name}".format(
+            namespace_and_name = importpath,
+        )
 
     return """
+load("@package_metadata//rules:package_metadata.bzl", "package_metadata")
 load("@rules_license//rules:package_info.bzl", "package_info")
+
+package_metadata(
+    name = "package_metadata",
+    purl = {purl},
+    visibility = [
+        "//:__subpackages__",
+    ],
+)
 
 package_info(
     name = "gazelle_generated_package_info",
@@ -661,4 +690,3 @@ go_repository = repository_rule(
         "internal_only_do_not_use_apparent_name": attr.string(doc = "Internal usage only"),
     },
 )
-"""See repository.md#go-repository for full documentation."""

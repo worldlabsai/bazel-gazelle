@@ -71,15 +71,13 @@ func RelBaseName(rel, prefix, root string) string {
 	return base
 }
 
-// Index returns the starting index of the string sub within the non-absolute
-// slash-separated path p. sub must start and end at component boundaries
-// within p.
+// Index returns the starting index of the first ocurrence of the string sub
+// within the slash-separated path p. sub must start and end at component
+// boundaries within p.
 func Index(p, sub string) int {
 	if sub == "" {
 		return 0
 	}
-	p = path.Clean(p)
-	sub = path.Clean(sub)
 	if path.IsAbs(sub) {
 		if HasPrefix(p, sub) {
 			return 0
@@ -110,6 +108,85 @@ func Index(p, sub string) int {
 		i += j + 1
 		if i >= len(p) {
 			return -1
+		}
+	}
+}
+
+// LastIndex returns the starting index of the last occurrence of the string sub
+// within the slash-separated path p. sub must start and end at component
+// boundaries within p.
+func LastIndex(p, sub string) int {
+	if sub == "" {
+		return len(p)
+	}
+	if path.IsAbs(sub) {
+		if HasPrefix(p, sub) {
+			return 0
+		} else {
+			return -1
+		}
+	}
+	if p == "" || p == "/" {
+		return -1
+	}
+
+	// prevIndex returns the starting index in p of the component that starts
+	// before index i.
+	prevIndex := func(i int) int {
+		slash := strings.LastIndexByte(p[:i], '/')
+		if slash < 0 {
+			return 0
+		}
+		return slash + 1
+	}
+	i := prevIndex(len(p))
+	for {
+		suffix := p[i:]
+		if len(suffix) >= len(sub) &&
+			suffix[:len(sub)] == sub &&
+			(len(suffix) == len(sub) || suffix[len(sub)] == '/') {
+			return i
+		}
+		if i == 0 || (p[0] == '/' && i == 1) {
+			return -1
+		}
+		i = prevIndex(i - 1)
+	}
+}
+
+// Prefixes returns an iterator (iter.Seq) over all the prefixes of p.
+// For example, if p is "a/b/c", the iterator yields "", "a", "a/b", "a/b/c".
+//
+// p must be a slash-separated path. It may be relative or absolute. p
+// does not need to be a clean path, but if it is not clean, Prefixes ignores
+// redundant slashes while keeping redundant path elements. For example,
+// if p is "a/../b//c/", the iterator yields "a", "..", "b", "c".
+func Prefixes(p string) func(yield func(string) bool) {
+	return func(yield func(string) bool) {
+		var slash int
+		if strings.HasPrefix(p, "/") {
+			slash = 0
+		} else {
+			slash = -1
+		}
+		if ok := yield(p[:slash+1]); !ok {
+			return
+		}
+		for {
+			i := strings.Index(p[slash+1:], "/")
+			if i < 0 {
+				break
+			}
+			if ok := yield(p[:slash+1+i]); !ok {
+				return
+			}
+			slash += 1 + i
+			for slash+1 < len(p) && p[slash+1] == '/' {
+				slash++ // skip over multiple slashes
+			}
+		}
+		if p != "" && !strings.HasSuffix(p, "/") {
+			yield(p)
 		}
 	}
 }

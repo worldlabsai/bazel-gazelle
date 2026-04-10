@@ -328,6 +328,28 @@ import ("C")
 				},
 			},
 		},
+		{
+			"noescape and nocallback directives",
+			`package foo
+
+/*
+#cgo noescape my_func
+#cgo nocallback my_func
+void my_func(void *param);
+
+// This directive won't be parsed if we failed
+// to parse the previous directives.
+#cgo CFLAGS: -O0
+*/
+import "C"
+`,
+			fileInfo{
+				isCgo: true,
+				copts: []*cgoTagsAndOpts{
+					{opts: "-O0"},
+				},
+			},
+		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			dir, err := os.MkdirTemp(os.Getenv("TEST_TEMPDIR"), "TestCgo")
@@ -468,6 +490,42 @@ func TestShellSafety(t *testing.T) {
 		if output != test.expected {
 			t.Errorf("Expected %q while %q expands with SRCDIR=%q; got %q", test.expected, test.input, test.srcdir, output)
 		}
+	}
+}
+
+func TestGoExperimentsTagsIgnored(t *testing.T) {
+	dir, err := os.MkdirTemp(os.Getenv("TEST_TEMPDIR"), "TestGoExperimentsTagsIgnored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+	})
+
+	for _, tc := range []struct {
+		desc, content string
+	}{
+		{
+			desc:    "goexperiment tag satisfied",
+			content: "//go:build goexperiment.range\n\npackage foo",
+		},
+		{
+			desc:    "negated goexperiments tag satisfied",
+			content: "//go:build !goexperiment.range\n\npackage foo",
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			path := filepath.Join(dir, tc.desc+".go")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			c, _, _ := testConfig(t)
+			fi := goFileInfo(path, "")
+			if !checkConstraints(c, "", "", fi.goos, fi.goarch, fi.tags, nil) {
+				t.Fatalf("constraints should be satisfied for %s", tc.desc)
+			}
+		})
 	}
 }
 

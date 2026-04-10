@@ -1,6 +1,5 @@
-load("@bazel_gazelle_is_bazel_module//:defs.bzl", "GAZELLE_IS_BAZEL_MODULE")
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@io_bazel_rules_go//go:def.bzl", "go_cross_binary", "nogo")
+load("@io_bazel_rules_go//go:def.bzl", "nogo")
 load("//:def.bzl", "gazelle", "gazelle_binary")
 
 # gazelle:prefix github.com/bazelbuild/bazel-gazelle
@@ -14,6 +13,7 @@ load("//:def.bzl", "gazelle", "gazelle_binary")
 # gazelle:exclude .vscode
 # gazelle:exclude internal/module/testdata
 # gazelle:go_naming_convention import_alias
+# gazelle:go_naming_convention_external import
 gazelle(
     name = "gazelle",
     command = "fix",
@@ -34,14 +34,8 @@ gazelle_binary(
         "//language/proto",
         "//language/go",
         "//internal/language/test_filegroup",
-        "@bazel_skylib_gazelle_plugin//bzl" if GAZELLE_IS_BAZEL_MODULE else "@bazel_skylib//gazelle/bzl",
+        "@bazel_skylib_gazelle_plugin//bzl",
     ],
-)
-
-go_cross_binary(
-    name = "gazelle_local_go1.22",
-    sdk_version = "1.22",
-    target = ":gazelle_local",
 )
 
 nogo(
@@ -54,10 +48,11 @@ nogo(
 exports_files(
     [
         "WORKSPACE",
+        "def.bzl",
         "extend.md",
-        "repository.md",
-        "extensions.md",
         "extensions.bzl",
+        "extensions.md",
+        "reference.md",
     ],
     visibility = ["//:__subpackages__"],
 )
@@ -74,14 +69,14 @@ filegroup(
         "CODEOWNERS",
         "CONTRIBUTING.md",
         "CONTRIBUTORS",
-        "Design.rst",
         "LICENSE",
-        "README.rst",
+        "README.md",
         "WORKSPACE",
         "def.bzl",
         "deps.bzl",
         "go.mod",
         "go.sum",
+        "how-gazelle-works.md",
         "//cmd:all_files",
         "//config:all_files",
         "//flag:all_files",
@@ -95,6 +90,7 @@ filegroup(
         "//rule:all_files",
         "//testtools:all_files",
         "//tools:all_files",
+        "//v2:all_files",
         "//walk:all_files",
     ],
     visibility = ["//visibility:public"],
@@ -109,8 +105,10 @@ bzl_library(
         "//internal:go_repository",
         "//internal:overlay_repository",
         "//internal/generationtest",
+        "@bazel_gazelle_go_repository_config//:go_env.bzl",
         "@bazel_gazelle_is_bazel_module//:defs",
         "@bazel_skylib//lib:shell",
+        "@rules_shell//shell:rules_bzl",
     ],
 )
 
@@ -133,4 +131,11 @@ bzl_library(
     srcs = ["extensions.bzl"],
     visibility = ["//visibility:public"],
     deps = ["//internal/bzlmod:go_deps"],
+)
+
+bzl_library(
+    name = "go_tools",
+    srcs = ["go_tools.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_gazelle_go_repository_config//:go_tools.bzl"],
 )

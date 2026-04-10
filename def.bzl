@@ -13,6 +13,10 @@
 # limitations under the License.
 
 load(
+    "@bazel_gazelle_go_repository_config//:go_env.bzl",
+    "GO_ENV",
+)
+load(
     "@bazel_gazelle_is_bazel_module//:defs.bzl",
     "GAZELLE_IS_BAZEL_MODULE",
 )
@@ -20,11 +24,13 @@ load(
     "@bazel_skylib//lib:shell.bzl",
     "shell",
 )
-load("@rules_shell//shell:sh_binary.bzl",
-    "sh_binary"
+load(
+    "@rules_shell//shell:sh_binary.bzl",
+    "sh_binary",
 )
-load("@rules_shell//shell:sh_test.bzl",
-    "sh_test"
+load(
+    "@rules_shell//shell:sh_test.bzl",
+    "sh_test",
 )
 load(
     "//internal:gazelle_binary.bzl",
@@ -51,8 +57,9 @@ gazelle_binary = _gazelle_binary
 gazelle_generation_test = _gazelle_generation_test
 
 DEFAULT_LANGUAGES = [
-    Label("//language/proto:go_default_library"),
-    Label("//language/go:go_default_library"),
+    Label("//language/bazel/visibility"),
+    Label("//language/proto"),
+    Label("//language/go"),
 ]
 
 def _valid_env_variable_name(name):
@@ -137,15 +144,16 @@ def _gazelle_runner_impl_factory(ctx, test_runner = False):
         args.extend(["-go_prefix", ctx.attr.prefix])
     if ctx.attr.build_tags:
         args.extend(["-build_tags", ",".join(ctx.attr.build_tags)])
-    if GAZELLE_IS_BAZEL_MODULE:
-        args.append("-bzlmod")
     args.extend([ctx.expand_location(arg, ctx.attr.data) for arg in ctx.attr.extra_args])
 
-    for key in ctx.attr.env:
+    combined_env = {}
+    combined_env.update(GO_ENV)
+    combined_env.update(ctx.attr.env)
+    for key in combined_env:
         if not _valid_env_variable_name(key):
             fail("Invalid environmental variable name: '%s'" % key)
 
-    env = "\n".join(["export %s=%s" % (x, shell.quote(y)) for (x, y) in ctx.attr.env.items()])
+    env = "\n".join(["export %s=%s" % (x, shell.quote(y)) for (x, y) in combined_env.items()])
 
     out_file = ctx.actions.declare_file(ctx.label.name + ".bash")
     go_tool = ctx.toolchains["@io_bazel_rules_go//go:toolchain"].sdk.go

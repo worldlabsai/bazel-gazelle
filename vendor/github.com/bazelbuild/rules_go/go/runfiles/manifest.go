@@ -29,7 +29,7 @@ import (
 )
 
 // ManifestFile specifies the location of the runfile manifest file.  You can
-// pass this as an option to New.  If unset or empty, use the value of the
+// pass this as an option to [New].  If unset or empty, use the value of the
 // environmental variable RUNFILES_MANIFEST_FILE.
 type ManifestFile string
 
@@ -77,13 +77,27 @@ func (f ManifestFile) parse() (manifest, error) {
 	defer r.Close()
 
 	s := bufio.NewScanner(r)
-	m := manifest{make(map[string]string),  nil}
+	m := manifest{make(map[string]string), nil}
 	for s.Scan() {
-		fields := strings.SplitN(s.Text(), " ", 2)
-		if len(fields) != 2 || fields[0] == "" {
-			return manifest{}, fmt.Errorf("runfiles: bad manifest line %q in file %s", s.Text(), f)
+		line := s.Text()
+		var link, target string
+		if strings.HasPrefix(line, " ") {
+			// In lines that start with a space, spaces, newlines, and backslashes are escaped as \s, \n, and \b in
+			// link and newlines and backslashes are escaped in target.
+			fields := strings.SplitN(s.Text()[1:], " ", 2)
+			link = fields[0]
+			target = fields[1]
+			link = strings.ReplaceAll(link, `\s`, " ")
+			link = strings.ReplaceAll(link, `\n`, "\n")
+			link = strings.ReplaceAll(link, `\b`, `\`)
+			target = strings.ReplaceAll(target, `\n`, "\n")
+			target = strings.ReplaceAll(target, `\b`, `\`)
+		} else {
+			fields := strings.SplitN(line, " ", 2)
+			link = fields[0]
+			target = fields[1]
 		}
-		m.index[fields[0]] = filepath.FromSlash(fields[1])
+		m.index[link] = filepath.FromSlash(target)
 	}
 
 	if err := s.Err(); err != nil {
@@ -124,7 +138,8 @@ func (m *manifest) open(name string) (fs.File, error) {
 			// name refers to an actual file or dir listed in the manifest. The
 			// basename of name may not match the basename of the underlying
 			// file (e.g. in the case of a root symlink), so patch it.
-			f, err := os.Open(r)
+			var f *os.File
+			f, err = os.Open(r)
 			if err != nil {
 				return nil, err
 			}
@@ -223,7 +238,7 @@ type dirFile string
 
 func (r dirFile) Stat() (fs.FileInfo, error) { return dirFileInfo(r), nil }
 func (r dirFile) Read(_ []byte) (int, error) { return 0, syscall.EISDIR }
-func (r dirFile) Close() error { return nil }
+func (r dirFile) Close() error               { return nil }
 
 type dirFileInfo string
 
@@ -233,4 +248,4 @@ func (dirFileInfo) Mode() fs.FileMode  { return fs.ModeDir | 0555 }
 func (dirFileInfo) ModTime() time.Time { return time.Time{} }
 func (dirFileInfo) IsDir() bool        { return true }
 func (dirFileInfo) Sys() interface{}   { return nil }
-func (i dirFileInfo) String() string { return fs.FormatFileInfo(i) }
+func (i dirFileInfo) String() string   { return fs.FormatFileInfo(i) }

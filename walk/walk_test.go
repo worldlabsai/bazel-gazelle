@@ -23,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -35,22 +36,44 @@ func TestConfigureCallbackOrder(t *testing.T) {
 	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{{Path: "a/b/"}})
 	defer cleanup()
 
-	var configureRels, callbackRels []string
-	c, cexts := testConfig(t, dir)
-	cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, _ *rule.File) {
-		configureRels = append(configureRels, rel)
-	}})
-	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
-		callbackRels = append(callbackRels, rel)
+	check := func(t *testing.T, configureRels, callbackRels []string) {
+		configureWant := []string{"", "a", "a/b"}
+		if diff := cmp.Diff(configureWant, configureRels); diff != "" {
+			t.Errorf("configure order (-want +got):\n%s", diff)
+		}
+		callbackWant := []string{"a/b", "a", ""}
+		if diff := cmp.Diff(callbackWant, callbackRels); diff != "" {
+			t.Errorf("callback order (-want +got):\n%s", diff)
+		}
+	}
+
+	t.Run("Walk", func(t *testing.T) {
+		var configureRels, callbackRels []string
+		c, cexts := testConfig(t, dir)
+		cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, _ *rule.File) {
+			configureRels = append(configureRels, rel)
+		}})
+		Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
+			callbackRels = append(callbackRels, rel)
+		})
+		check(t, configureRels, callbackRels)
 	})
-	configureWant := []string{"", "a", "a/b"}
-	if diff := cmp.Diff(configureWant, configureRels); diff != "" {
-		t.Errorf("configure order (-want +got):\n%s", diff)
-	}
-	callbackWant := []string{"a/b", "a", ""}
-	if diff := cmp.Diff(callbackWant, callbackRels); diff != "" {
-		t.Errorf("callback order (-want +got):\n%s", diff)
-	}
+
+	t.Run("Walk2", func(t *testing.T) {
+		var configureRels, callbackRels []string
+		c, cexts := testConfig(t, dir)
+		cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, _ *rule.File) {
+			configureRels = append(configureRels, rel)
+		}})
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			callbackRels = append(callbackRels, args.Rel)
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, configureRels, callbackRels)
+	})
 }
 
 func TestUpdateDirs(t *testing.T) {
@@ -75,10 +98,11 @@ func TestUpdateDirs(t *testing.T) {
 		Update bool
 	}
 	for _, tc := range []struct {
-		desc string
-		rels []string
-		mode Mode
-		want []visitSpec
+		desc    string
+		rels    []string
+		mode    Mode
+		want    []visitSpec
+		wantErr bool
 	}{
 		{
 			desc: "visit_all_update_subdirs",
@@ -94,6 +118,7 @@ func TestUpdateDirs(t *testing.T) {
 				{"update", true},
 				{"", false},
 			},
+			wantErr: true,
 		}, {
 			desc: "visit_all_update_dirs",
 			rels: []string{"update", "update/ignore/sub"},
@@ -108,13 +133,16 @@ func TestUpdateDirs(t *testing.T) {
 				{"update", true},
 				{"", false},
 			},
+			wantErr: true,
 		}, {
 			desc: "update_dirs",
 			rels: []string{"update", "update/ignore/sub"},
 			mode: UpdateDirsMode,
 			want: []visitSpec{
 				{"update/ignore/sub", true},
+				{"update/ignore", false},
 				{"update", true},
+				{"", false},
 			},
 		}, {
 			desc: "update_subdirs",
@@ -125,6 +153,8 @@ func TestUpdateDirs(t *testing.T) {
 				{"update/ignore", false},
 				{"update/sub/sub", true},
 				{"update/sub", true},
+				{"update", false},
+				{"", false},
 			},
 		},
 	} {
@@ -134,13 +164,35 @@ func TestUpdateDirs(t *testing.T) {
 			for i, rel := range tc.rels {
 				dirs[i] = filepath.Join(dir, filepath.FromSlash(rel))
 			}
-			var visits []visitSpec
-			Walk(c, cexts, dirs, tc.mode, func(_ string, rel string, _ *config.Config, update bool, _ *rule.File, _, _, _ []string) {
-				visits = append(visits, visitSpec{rel, update})
+
+			t.Run("Walk", func(t *testing.T) {
+				var visits []visitSpec
+				Walk(c, cexts, dirs, tc.mode, func(_ string, rel string, _ *config.Config, update bool, _ *rule.File, _, _, _ []string) {
+					visits = append(visits, visitSpec{rel, update})
+				})
+				if diff := cmp.Diff(tc.want, visits); diff != "" {
+					t.Errorf("Walk visits (-want +got):\n%s", diff)
+				}
 			})
-			if diff := cmp.Diff(tc.want, visits); diff != "" {
-				t.Errorf("Walk visits (-want +got):\n%s", diff)
-			}
+
+			t.Run("Walk2", func(t *testing.T) {
+				var visits []visitSpec
+				err := Walk2(c, cexts, dirs, tc.mode, func(args Walk2FuncArgs) Walk2FuncResult {
+					visits = append(visits, visitSpec{args.Rel, args.Update})
+					return Walk2FuncResult{}
+				})
+				if tc.wantErr && err == nil {
+					t.Fatal("unexpected success")
+				}
+				if !tc.wantErr {
+					if !tc.wantErr && err != nil {
+						t.Fatal(err)
+					}
+					if diff := cmp.Diff(tc.want, visits); diff != "" {
+						t.Errorf("Walk visits (-want +got):\n%s", diff)
+					}
+				}
+			})
 		})
 	}
 }
@@ -172,21 +224,14 @@ func TestGenMode(t *testing.T) {
 	defer cleanup()
 
 	type visitSpec struct {
+		rel            string
 		subdirs, files []string
 	}
 
-	t.Run("generation_mode create vs update", func(t *testing.T) {
-		c, cexts := testConfig(t, dir)
-		var visits []visitSpec
-		Walk(c, cexts, []string{"."}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, update bool, _ *rule.File, subdirs, regularFiles, _ []string) {
-			visits = append(visits, visitSpec{
-				subdirs: subdirs,
-				files:   regularFiles,
-			})
-		})
-
+	check := func(t *testing.T, visits []visitSpec) {
+		t.Helper()
 		if len(visits) != 7 {
-			t.Error(fmt.Sprintf("Expected 7 visits, got %v", len(visits)))
+			t.Errorf("Expected 7 visits, got %v", len(visits))
 		}
 
 		if !reflect.DeepEqual(visits[len(visits)-1].subdirs, []string{"mode-create", "mode-update"}) {
@@ -205,6 +250,55 @@ func TestGenMode(t *testing.T) {
 		if !reflect.DeepEqual(visits[5].files, modeUpdateFiles2) {
 			t.Errorf("update mode should contain files in subdirs. Want %v, got: %v", modeUpdateFiles2, visits[5].files)
 		}
+
+		// Verify every file+directory is only passed to a single WalkFunc invocation.
+		filesSeen := make(map[string]string)
+		for _, v := range visits {
+			for _, f := range v.files {
+				fullPath := filepath.Join(v.rel, f)
+				if p, exists := filesSeen[fullPath]; exists {
+					t.Errorf("File %q already seen in %q, now also in %q", fullPath, p, v.rel)
+				}
+				filesSeen[fullPath] = v.rel
+			}
+			for _, f := range v.subdirs {
+				fullPath := filepath.Join(v.rel, f)
+				if p, exists := filesSeen[fullPath]; exists {
+					t.Errorf("Dir %q already seen in %q, now also in %q", fullPath, p, v.rel)
+				}
+				filesSeen[fullPath] = v.rel
+			}
+		}
+	}
+
+	t.Run("Walk generation_mode create vs update", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var visits []visitSpec
+		Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, update bool, _ *rule.File, subdirs, regularFiles, _ []string) {
+			visits = append(visits, visitSpec{
+				rel:     rel,
+				subdirs: subdirs,
+				files:   regularFiles,
+			})
+		})
+		check(t, visits)
+	})
+
+	t.Run("Walk2 generation_mode create vs update", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var visits []visitSpec
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			visits = append(visits, visitSpec{
+				rel:     args.Rel,
+				subdirs: args.Subdirs,
+				files:   args.RegularFiles,
+			})
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, visits)
 	})
 }
 
@@ -223,23 +317,48 @@ func TestCustomBuildName(t *testing.T) {
 	})
 	defer cleanup()
 
-	c, cexts := testConfig(t, dir)
-	var rels []string
-	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, _ string, _ *config.Config, _ bool, f *rule.File, _, _, _ []string) {
-		rel, err := filepath.Rel(c.RepoRoot, f.Path)
-		if err != nil {
-			t.Error(err)
-		} else {
-			rels = append(rels, filepath.ToSlash(rel))
+	check := func(t *testing.T, rels []string) {
+		t.Helper()
+		want := []string{
+			"sub/BUILD.test",
+			"BUILD.bazel",
 		}
+		if diff := cmp.Diff(want, rels); diff != "" {
+			t.Errorf("Walk relative paths (-want +got):\n%s", diff)
+		}
+	}
+
+	t.Run("Walk", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var rels []string
+		Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, _ string, _ *config.Config, _ bool, f *rule.File, _, _, _ []string) {
+			rel, err := filepath.Rel(c.RepoRoot, f.Path)
+			if err != nil {
+				t.Error(err)
+			} else {
+				rels = append(rels, filepath.ToSlash(rel))
+			}
+		})
+		check(t, rels)
 	})
-	want := []string{
-		"sub/BUILD.test",
-		"BUILD.bazel",
-	}
-	if diff := cmp.Diff(want, rels); diff != "" {
-		t.Errorf("Walk relative paths (-want +got):\n%s", diff)
-	}
+
+	t.Run("Walk2", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var rels []string
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			rel, err := filepath.Rel(c.RepoRoot, args.File.Path)
+			if err != nil {
+				t.Error(err)
+			} else {
+				rels = append(rels, filepath.ToSlash(rel))
+			}
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, rels)
+	})
 }
 
 func TestExcludeFiles(t *testing.T) {
@@ -304,20 +423,45 @@ a.file
 	})
 	defer cleanup()
 
-	c, cexts := testConfig(t, dir)
-	var files []string
-	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, regularFiles, genFiles []string) {
-		for _, f := range regularFiles {
-			files = append(files, path.Join(rel, f))
+	check := func(t *testing.T, files []string) {
+		t.Helper()
+		want := []string{"a/a.proto", "a/b.gen.go", "dir2/a/c", "foo/a/c", ".bazelignore", ".dot", "BUILD.bazel", "_blank"}
+		if diff := cmp.Diff(want, files); diff != "" {
+			t.Errorf("Walk files (-want +got):\n%s", diff)
 		}
-		for _, f := range genFiles {
-			files = append(files, path.Join(rel, f))
-		}
-	})
-	want := []string{"a/a.proto", "a/b.gen.go", "dir2/a/c", "foo/a/c", ".bazelignore", ".dot", "BUILD.bazel", "_blank"}
-	if diff := cmp.Diff(want, files); diff != "" {
-		t.Errorf("Walk files (-want +got):\n%s", diff)
 	}
+
+	t.Run("Walk", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var files []string
+		Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, regularFiles, genFiles []string) {
+			for _, f := range regularFiles {
+				files = append(files, path.Join(rel, f))
+			}
+			for _, f := range genFiles {
+				files = append(files, path.Join(rel, f))
+			}
+		})
+		check(t, files)
+	})
+
+	t.Run("Walk2", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var files []string
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			for _, f := range args.RegularFiles {
+				files = append(files, path.Join(args.Rel, f))
+			}
+			for _, f := range args.GenFiles {
+				files = append(files, path.Join(args.Rel, f))
+			}
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, files)
+	})
 }
 
 func TestExcludeSelf(t *testing.T) {
@@ -333,16 +477,35 @@ func TestExcludeSelf(t *testing.T) {
 	})
 	defer cleanup()
 
-	c, cexts := testConfig(t, dir)
-	var rels []string
-	Walk(c, cexts, []string{dir}, VisitAllUpdateDirsMode, func(_ string, rel string, _ *config.Config, _ bool, f *rule.File, _, _, _ []string) {
-		rels = append(rels, rel)
+	check := func(t *testing.T, rels []string) {
+		t.Helper()
+		want := []string{""}
+		if diff := cmp.Diff(want, rels); diff != "" {
+			t.Errorf("Walk relative paths (-want +got):\n%s", diff)
+		}
+	}
+
+	t.Run("Walk", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var rels []string
+		Walk(c, cexts, []string{dir}, VisitAllUpdateDirsMode, func(_ string, rel string, _ *config.Config, _ bool, f *rule.File, _, _, _ []string) {
+			rels = append(rels, rel)
+		})
+		check(t, rels)
 	})
 
-	want := []string{""}
-	if diff := cmp.Diff(want, rels); diff != "" {
-		t.Errorf("Walk relative paths (-want +got):\n%s", diff)
-	}
+	t.Run("Walk2", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var rels []string
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			rels = append(rels, args.Rel)
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, rels)
+	})
 }
 
 func TestGeneratedFiles(t *testing.T) {
@@ -369,23 +532,359 @@ unknown_rule(
 	})
 	defer cleanup()
 
-	c, cexts := testConfig(t, dir)
-	var regularFiles, genFiles []string
-	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, reg, gen []string) {
-		for _, f := range reg {
-			regularFiles = append(regularFiles, path.Join(rel, f))
+	check := func(t *testing.T, regularFiles, genFiles []string) {
+		t.Helper()
+		regWant := []string{"BUILD.bazel", "gen-and-static", "static"}
+		if diff := cmp.Diff(regWant, regularFiles); diff != "" {
+			t.Errorf("Walk regularFiles (-want +got):\n%s", diff)
 		}
-		for _, f := range gen {
-			genFiles = append(genFiles, path.Join(rel, f))
+		genWant := []string{"gen1", "gen2", "gen-and-static"}
+		if diff := cmp.Diff(genWant, genFiles); diff != "" {
+			t.Errorf("Walk genFiles (-want +got):\n%s", diff)
 		}
-	})
-	regWant := []string{"BUILD.bazel", "gen-and-static", "static"}
-	if diff := cmp.Diff(regWant, regularFiles); diff != "" {
-		t.Errorf("Walk regularFiles (-want +got):\n%s", diff)
 	}
-	genWant := []string{"gen1", "gen2", "gen-and-static"}
-	if diff := cmp.Diff(genWant, genFiles); diff != "" {
-		t.Errorf("Walk genFiles (-want +got):\n%s", diff)
+
+	t.Run("Walk", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var regularFiles, genFiles []string
+		Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, reg, gen []string) {
+			for _, f := range reg {
+				regularFiles = append(regularFiles, path.Join(rel, f))
+			}
+			for _, f := range gen {
+				genFiles = append(genFiles, path.Join(rel, f))
+			}
+		})
+		check(t, regularFiles, genFiles)
+	})
+
+	t.Run("Walk2", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var regularFiles, genFiles []string
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			for _, f := range args.RegularFiles {
+				regularFiles = append(regularFiles, path.Join(args.Rel, f))
+			}
+			for _, f := range args.GenFiles {
+				genFiles = append(genFiles, path.Join(args.Rel, f))
+			}
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, regularFiles, genFiles)
+	})
+}
+
+func TestFollow(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `
+# gazelle:follow a
+# gazelle:exclude _*
+`,
+		},
+		{Path: "_a/"},
+		{Path: "_b/"},
+		{Path: "_c"},
+		{
+			Path:    "a",
+			Symlink: "_a",
+		},
+		{
+			Path:    "b",
+			Symlink: "_b",
+		},
+		{
+			Path:    "c",
+			Symlink: "_c",
+		},
+	})
+	defer cleanup()
+
+	check := func(t *testing.T, regularFiles, subdirs []string) {
+		t.Helper()
+		wantRegularFiles := []string{"BUILD.bazel", "b", "c"}
+		if diff := cmp.Diff(wantRegularFiles, regularFiles); diff != "" {
+			t.Errorf("regular files (-want, +got):\n%s", diff)
+		}
+		wantSubdirs := []string{"a"}
+		if diff := cmp.Diff(wantSubdirs, subdirs); diff != "" {
+			t.Errorf("subdirs (-want, +got):\n%s", diff)
+		}
+	}
+
+	t.Run("Walk", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var gotRegularFiles, gotSubdirs []string
+		Walk(c, cexts, []string{dir}, UpdateDirsMode, func(_, _ string, _ *config.Config, _ bool, _ *rule.File, subdirs, regularFiles, _ []string) {
+			gotRegularFiles = regularFiles
+			gotSubdirs = subdirs
+		})
+		check(t, gotRegularFiles, gotSubdirs)
+	})
+
+	t.Run("Walk2", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var gotRegularFiles, gotSubdirs []string
+		err := Walk2(c, cexts, []string{dir}, UpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			gotRegularFiles = args.RegularFiles
+			gotSubdirs = args.Subdirs
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, gotRegularFiles, gotSubdirs)
+	})
+}
+
+func TestSubdirsContained(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `
+# gazelle:exclude exclude
+# gazelle:generation_mode update_only
+`,
+		},
+		{
+			Path: "with_build_file/BUILD.bazel",
+		},
+		{
+			Path: "with_build_file/sub/file.txt",
+		},
+		{
+			Path: "without_build_file/file.txt",
+		},
+		{
+			Path: "without_build_file/sub/file.txt",
+		},
+		{
+			Path: "exclude/file.txt",
+		},
+		{
+			Path: "exclude/sub/file.txt",
+		},
+	})
+	defer cleanup()
+
+	wantRegularFiles := []string{"BUILD.bazel", "without_build_file/file.txt", "without_build_file/sub/file.txt"}
+	wantSubdirs := []string{"with_build_file", "without_build_file", "without_build_file/sub"}
+	check := func(t *testing.T, regularFiles, subdirs []string) {
+		if diff := cmp.Diff(wantRegularFiles, regularFiles); diff != "" {
+			t.Errorf("regular files (-want, +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantSubdirs, subdirs); diff != "" {
+			t.Errorf("subdirs (-want, +got):\n%s", diff)
+		}
+	}
+
+	t.Run("Walk", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var rootRegularFiles, rootSubdirs []string
+		Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_, rel string, _ *config.Config, _ bool, _ *rule.File, subdirs, regularFiles, _ []string) {
+			if rel == "" {
+				rootRegularFiles = regularFiles
+				rootSubdirs = subdirs
+			}
+		})
+		check(t, rootRegularFiles, rootSubdirs)
+	})
+
+	t.Run("Walk2", func(t *testing.T) {
+		c, cexts := testConfig(t, dir)
+		var rootRegularFiles, rootSubdirs []string
+		err := Walk2(c, cexts, []string{dir}, VisitAllUpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+			if args.Rel == "" {
+				rootRegularFiles = args.RegularFiles
+				rootSubdirs = args.Subdirs
+			}
+			return Walk2FuncResult{}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, rootRegularFiles, rootSubdirs)
+	})
+}
+
+func TestRelsToVisit(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{Path: "update/sub/"},
+		{Path: "extra/a/sub/"},
+		{Path: "extra/b/sub/"},
+		{Path: "extra/does/not/"},
+	})
+	defer cleanup()
+
+	// Update the update/ directory only without recursing.
+	// Return extra/a/ through RelsToVisit.
+	var configuredRels, visitedRels, updatedRels []string
+	c, cexts := testConfig(t, dir)
+	cexts = append(cexts, &testConfigurer{
+		configure: func(_ *config.Config, rel string, _ *rule.File) {
+			configuredRels = append(configuredRels, rel)
+		},
+	})
+	updateDir := filepath.Join(dir, "update")
+	err := Walk2(c, cexts, []string{updateDir}, UpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+		visitedRels = append(visitedRels, args.Rel)
+		if args.Update {
+			updatedRels = append(updatedRels, args.Rel)
+		}
+		res := Walk2FuncResult{}
+		switch args.Rel {
+		case "update":
+			res.RelsToVisit = []string{"update", "extra/a"}
+		case "extra/a":
+			res.RelsToVisit = []string{"update", "extra/b/sub"}
+		case "extra/b/sub":
+			res.RelsToVisit = []string{"update", "extra/b"}
+		case "extra/b":
+			res.RelsToVisit = []string{"extra/does/not/exist"}
+		}
+		return res
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify directories mentioned in RelsToVisit were configured, as well as
+	// their parents.
+	wantConfiguredRels := []string{"", "update", "extra", "extra/a", "extra/b", "extra/b/sub", "extra/does", "extra/does/not"}
+	if diff := cmp.Diff(wantConfiguredRels, configuredRels); diff != "" {
+		t.Errorf("configured rels (-want,+got):\n%s", diff)
+	}
+	// Verify directories mentioned in RelsToVisit were visited, as well as their
+	// parents.
+	wantVisitedRels := []string{"update", "", "extra", "extra/a", "extra/b", "extra/b/sub", "extra/does", "extra/does/not"}
+	if diff := cmp.Diff(wantVisitedRels, visitedRels); diff != "" {
+		t.Errorf("visited rels (-want,+got)\n%s", diff)
+	}
+	// Verify directories mentioned in RelsToVisit were not updated.
+	wantUpdatedRels := []string{"update"}
+	if diff := cmp.Diff(wantUpdatedRels, updatedRels); diff != "" {
+		t.Errorf("updated rels (-want,+got)\n%s", diff)
+	}
+}
+
+func TestGetDirInfo(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `
+# gazelle:exclude exclude
+genrule(
+    name = "gen",
+		outs = ["gen.txt"],
+)
+`,
+		},
+		{
+			Path: "exclude",
+		},
+		{
+			Path: "file",
+		},
+		{
+			Path: "subdir/",
+		},
+	})
+	defer cleanup()
+
+	wantRegularFiles := []string{"BUILD.bazel", "file"}
+	wantSubdirs := []string{"subdir"}
+	wantGenFiles := []string{"gen.txt"}
+
+	c, cexts := testConfig(t, dir)
+	err := Walk2(c, cexts, []string{dir}, VisitAllUpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+		di, err := GetDirInfo("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff(wantRegularFiles, di.RegularFiles); diff != "" {
+			t.Errorf("regular files (-want, +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantSubdirs, di.Subdirs); diff != "" {
+			t.Errorf("subdirectories (-want, +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(wantGenFiles, di.GenFiles); diff != "" {
+			t.Errorf("gen files (-want, +got):\n%s", diff)
+		}
+		return Walk2FuncResult{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetDirInfoSubdir(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path:    "BUILD.bazel",
+			Content: `# gazelle:exclude x`,
+		},
+		{
+			Path: "a/b/c.txt",
+		},
+		{
+			Path: "x/y/z.txt",
+		},
+	})
+	defer cleanup()
+
+	c, cexts := testConfig(t, dir)
+	err := Walk2(c, cexts, []string{dir}, UpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+		bInfo, err := GetDirInfo("a/b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff([]string{"c.txt"}, bInfo.RegularFiles); diff != "" {
+			t.Errorf("a/b: regular files (-want, +got):\n%s", diff)
+		}
+
+		if _, err := GetDirInfo("x/y"); err == nil {
+			t.Errorf("x/y: unexpected success")
+		}
+		return Walk2FuncResult{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetDirInfoErrorOnParent(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path:    "BUILD.bazel",
+			Content: `filegroup(name = "foo". srcs = ["parent/child/file.txt"])`,
+		},
+		{
+			Path: "parent/child/file.txt",
+		},
+	})
+	defer cleanup()
+
+	c, cexts := testConfig(t, dir)
+	err := Walk2(c, cexts, []string{dir}, UpdateDirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+		di, err := GetDirInfo("parent/child")
+		if err == nil {
+			t.Error("expected error due to error in parent")
+		}
+
+		// Verify that the returned DirInfo when an error was returned
+		if di.config != nil || di.File != nil || len(di.RegularFiles) != 0 || len(di.Subdirs) != 0 || len(di.GenFiles) != 0 {
+			t.Errorf("expected empty DirInfo when parent is excluded, got RegularFiles=%v, Subdirs=%v, GenFiles=%v",
+				di.RegularFiles, di.Subdirs, di.GenFiles)
+		}
+
+		return Walk2FuncResult{}
+	})
+	if err == nil {
+		t.Error("expected error due to error in parent")
 	}
 }
 
@@ -410,6 +909,205 @@ func (*testConfigurer) KnownDirectives() []string { return nil }
 
 func (tc *testConfigurer) Configure(c *config.Config, rel string, f *rule.File) {
 	tc.configure(c, rel, f)
+}
+
+func TestDirectiveFile(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `# gazelle:directive_file directives.cfg
+# gazelle:exclude inline_excluded
+`,
+		},
+		{
+			Path: "directives.cfg",
+			Content: `# gazelle:exclude external_excluded
+`,
+		},
+		{Path: "kept/"},
+		{Path: "inline_excluded/"},
+		{Path: "external_excluded/"},
+	})
+	defer cleanup()
+
+	// Walk and collect visited rels. Both inline_excluded and
+	// external_excluded should be excluded.
+	var visited []string
+	c, cexts := testConfig(t, dir)
+	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, rel string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
+		visited = append(visited, rel)
+	})
+
+	want := []string{"kept", ""}
+	if diff := cmp.Diff(want, visited); diff != "" {
+		t.Errorf("visited directories (-want +got):\n%s", diff)
+	}
+}
+
+func TestDirectiveFileWithResolve(t *testing.T) {
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `# gazelle:directive_file resolve_overrides.cfg
+`,
+		},
+		{
+			Path: "resolve_overrides.cfg",
+			Content: `# gazelle:resolve go example.com/foo //third_party:foo
+# gazelle:resolve go example.com/bar //third_party:bar
+`,
+		},
+	})
+	defer cleanup()
+
+	// Walk and verify that the resolve directives from the external file
+	// are visible in the file's directives.
+	var gotDirectives []rule.Directive
+	c, cexts := testConfig(t, dir)
+	cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, f *rule.File) {
+		if rel == "" && f != nil {
+			gotDirectives = f.Directives
+		}
+	}})
+	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, _ string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
+	})
+
+	want := []rule.Directive{
+		{Key: "resolve", Value: "go example.com/foo //third_party:foo"},
+		{Key: "resolve", Value: "go example.com/bar //third_party:bar"},
+	}
+	if diff := cmp.Diff(want, gotDirectives); diff != "" {
+		t.Errorf("directives (-want +got):\n%s", diff)
+	}
+}
+
+func TestDirectiveFileOrdering(t *testing.T) {
+	// Directives from the external file should appear at the position of
+	// the directive_file entry. Inline directives after it take precedence
+	// for last-writer-wins semantics.
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `# gazelle:resolve go example.com/before //before
+# gazelle:directive_file overrides.cfg
+# gazelle:resolve go example.com/after //after
+`,
+		},
+		{
+			Path: "overrides.cfg",
+			Content: `# gazelle:resolve go example.com/external //external
+`,
+		},
+	})
+	defer cleanup()
+
+	var gotDirectives []rule.Directive
+	c, cexts := testConfig(t, dir)
+	cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, f *rule.File) {
+		if rel == "" && f != nil {
+			gotDirectives = f.Directives
+		}
+	}})
+	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, _ string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
+	})
+
+	want := []rule.Directive{
+		{Key: "resolve", Value: "go example.com/before //before"},
+		{Key: "resolve", Value: "go example.com/external //external"},
+		{Key: "resolve", Value: "go example.com/after //after"},
+	}
+	if diff := cmp.Diff(want, gotDirectives); diff != "" {
+		t.Errorf("directives (-want +got):\n%s", diff)
+	}
+}
+
+func TestDirectiveFileNoRecursion(t *testing.T) {
+	// directive_file entries inside an external file should produce an error
+	// and be skipped.
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{
+			Path: "BUILD.bazel",
+			Content: `# gazelle:directive_file level1.cfg
+`,
+		},
+		{
+			Path: "level1.cfg",
+			Content: `# gazelle:resolve go example.com/foo //foo
+# gazelle:directive_file level2.cfg
+`,
+		},
+		{
+			Path: "level2.cfg",
+			Content: `# gazelle:resolve go example.com/bar //bar
+`,
+		},
+	})
+	defer cleanup()
+
+	var gotDirectives []rule.Directive
+	c, cexts := testConfig(t, dir)
+	cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, f *rule.File) {
+		if rel == "" && f != nil {
+			gotDirectives = f.Directives
+		}
+	}})
+	err := Walk2(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(args Walk2FuncArgs) Walk2FuncResult {
+		return Walk2FuncResult{}
+	})
+
+	// Walk2 should return an error about recursive directive_file.
+	if err == nil {
+		t.Fatal("expected error for recursive directive_file, got nil")
+	}
+	if !strings.Contains(err.Error(), "recursive directive_file is not supported") {
+		t.Errorf("expected error about recursive directive_file, got: %v", err)
+	}
+
+	// Only the resolve from level1.cfg should be present; the recursive
+	// directive_file entry is skipped.
+	want := []rule.Directive{
+		{Key: "resolve", Value: "go example.com/foo //foo"},
+	}
+	if diff := cmp.Diff(want, gotDirectives); diff != "" {
+		t.Errorf("directives (-want +got):\n%s", diff)
+	}
+}
+
+func TestDirectiveFileRelativeToPackage(t *testing.T) {
+	// directive_file paths should be resolved relative to the directory
+	// containing the BUILD file, not the repo root.
+	dir, cleanup := testtools.CreateFiles(t, []testtools.FileSpec{
+		{Path: "BUILD.bazel", Content: ""},
+		{
+			Path: "sub/BUILD.bazel",
+			Content: `# gazelle:directive_file local_directives.cfg
+`,
+		},
+		{
+			Path: "sub/local_directives.cfg",
+			Content: `# gazelle:resolve go example.com/sub //sub:lib
+`,
+		},
+		{Path: "sub/child/"},
+	})
+	defer cleanup()
+
+	var gotDirectives []rule.Directive
+	c, cexts := testConfig(t, dir)
+	cexts = append(cexts, &testConfigurer{func(_ *config.Config, rel string, f *rule.File) {
+		if rel == "sub" && f != nil {
+			gotDirectives = f.Directives
+		}
+	}})
+	Walk(c, cexts, []string{dir}, VisitAllUpdateSubdirsMode, func(_ string, _ string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
+	})
+
+	want := []rule.Directive{
+		{Key: "resolve", Value: "go example.com/sub //sub:lib"},
+	}
+	if diff := cmp.Diff(want, gotDirectives); diff != "" {
+		t.Errorf("directives (-want +got):\n%s", diff)
+	}
 }
 
 // BenchmarkWalk measures how long it takes Walk to traverse a synthetic repo.

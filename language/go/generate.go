@@ -30,6 +30,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
 	"github.com/bazelbuild/bazel-gazelle/pathtools"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/bazel-gazelle/walk"
 )
 
 func (gl *goLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
@@ -107,12 +108,20 @@ func (gl *goLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	}
 
 	// Look for a subdirectory named testdata. Only treat it as data if it does
-	// not contain a buildable package.
+	// not contain a buildable package and is not empty.
 	var hasTestdata bool
 	for _, sub := range args.Subdirs {
 		if sub == "testdata" {
 			_, ok := gl.goPkgRels[path.Join(args.Rel, "testdata")]
-			hasTestdata = !ok
+
+			// Check that testdata directory is not empty
+			if !ok {
+				testdataRel := path.Join(args.Rel, "testdata")
+				testdataDir, err := walk.GetDirInfo(testdataRel)
+				if err == nil && (len(testdataDir.Subdirs) > 0 || len(testdataDir.RegularFiles) > 0 || len(testdataDir.GenFiles) > 0) {
+					hasTestdata = true
+				}
+			}
 			break
 		}
 	}
@@ -195,11 +204,7 @@ func (gl *goLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	// Generate rules for proto packages. These should come before the other
 	// Go rules.
-	g := &generator{
-		c:                   c,
-		rel:                 args.Rel,
-		shouldSetVisibility: shouldSetVisibility(args),
-	}
+	g := newGenerator(c, gc, args)
 	var res language.GenerateResult
 	var rules []*rule.Rule
 	var protoEmbeds []string
@@ -383,9 +388,18 @@ func (gl *goLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			res.Empty = append(res.Empty, r)
 		} else {
 			res.Gen = append(res.Gen, r)
-			res.Imports = append(res.Imports, r.PrivateAttr(config.GazelleImportsKey))
+			rawImports := r.PrivateAttr(config.GazelleImportsKey)
+			res.Imports = append(res.Imports, rawImports)
+			if imports, ok := rawImports.(rule.PlatformStrings); ok && g.shouldIndex {
+				g.addRelsToIndex(imports)
+			}
 		}
 	}
+
+	for r := range g.relsToIndexSeen {
+		res.RelsToIndex = append(res.RelsToIndex, r)
+	}
+	sort.Strings(res.RelsToIndex) // for deterministic output
 
 	if args.File != nil || len(res.Gen) > 0 {
 		gl.goPkgRels[args.Rel] = true
@@ -506,8 +520,26 @@ func defaultPackageName(c *config.Config, rel string) string {
 
 type generator struct {
 	c                   *config.Config
+	gc                  *goConfig
 	rel                 string
 	shouldSetVisibility bool
+
+	shouldIndex     bool
+	relsToIndexSeen map[string]struct{}
+}
+
+func newGenerator(c *config.Config, gc *goConfig, args language.GenerateArgs) *generator {
+	g := &generator{
+		c:                   c,
+		gc:                  gc,
+		rel:                 args.Rel,
+		shouldSetVisibility: shouldSetVisibility(args),
+		shouldIndex:         c.IndexLibraries && len(gc.goSearch) > 0,
+	}
+	if g.shouldIndex {
+		g.relsToIndexSeen = make(map[string]struct{})
+	}
+	return g
 }
 
 func (g *generator) generateProto(mode proto.Mode, targets []protoTarget, importPath string) (string, []*rule.Rule) {
@@ -770,6 +802,9 @@ func (g *generator) setCommonAttrs(r *rule.Rule, pkgRel string, visibility []str
 	if target.cgo {
 		r.SetAttr("cgo", true)
 	}
+	if target.pgoprofile != "" {
+		r.SetAttr("pgoprofile", target.pgoprofile)
+	}
 	if !target.clinkopts.isEmpty() {
 		r.SetAttr("clinkopts", g.options(target.clinkopts.build(), pkgRel))
 	}
@@ -823,8 +858,8 @@ func (g *generator) commonVisibility(importPath string) []string {
 	// subpackages of the parent.
 	// If the import path contains "internal" but rel does not, this is
 	// probably an internal submodule. Add visibility for all subpackages.
-	relIndex := pathtools.Index(g.rel, "internal")
-	importIndex := pathtools.Index(importPath, "internal")
+	relIndex := pathtools.LastIndex(g.rel, "internal")
+	importIndex := pathtools.LastIndex(importPath, "internal")
 	visibility := getGoConfig(g.c).goVisibility
 	if relIndex >= 0 {
 		parent := strings.TrimSuffix(g.rel[:relIndex], "/")
@@ -838,7 +873,6 @@ func (g *generator) commonVisibility(importPath string) []string {
 				visibility = append(visibility, "@"+repo.Name()+"//:__subpackages__")
 			}
 		}
-
 	} else {
 		return []string{"//visibility:public"}
 	}
@@ -950,4 +984,19 @@ func shouldSetVisibility(args language.GenerateArgs) bool {
 		}
 	}
 	return true
+}
+
+func (g *generator) addRelsToIndex(ps rule.PlatformStrings) {
+	// TODO: refactor to for-iterator loop after Go 1.23 is the minimum version.
+	ps.Each()(func(imp string) bool {
+		for _, goSearch := range g.gc.goSearch {
+			if trimmed := pathtools.TrimPrefix(imp, goSearch.prefix); goSearch.prefix == "" || trimmed != imp {
+				rel := path.Join(goSearch.rel, trimmed)
+				if _, ok := g.relsToIndexSeen[rel]; !ok {
+					g.relsToIndexSeen[rel] = struct{}{}
+				}
+			}
+		}
+		return true
+	})
 }

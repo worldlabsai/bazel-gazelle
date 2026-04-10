@@ -15,6 +15,8 @@
 visibility("private")
 
 DEFAULT_BUILD_FILE_GENERATION_BY_PATH = {
+    "cel.dev/expr": "on",
+    "github.com/bazelbuild/remote-apis-sdks": "on",
     "github.com/cncf/xds/go": "on",
     "github.com/envoyproxy/protoc-gen-validate": "on",
     "github.com/google/safetext": "on",
@@ -29,6 +31,15 @@ DEFAULT_DIRECTIVES_BY_PATH = {
     "github.com/argoproj/argo-events": [
         "gazelle:proto disable",
         "gazelle:go_naming_convention import_alias",
+    ],
+    "github.com/authzed/cel-go": [
+        "gazelle:go_naming_convention go_default_library",
+    ],
+    "github.com/authzed/spicedb": [
+        "gazelle:proto disable",
+    ],
+    "github.com/bufbuild/protocompile": [
+        "gazelle:proto disable",
     ],
     "github.com/census-instrumentation/opencensus-proto": [
         "gazelle:proto disable",
@@ -88,6 +99,9 @@ DEFAULT_DIRECTIVES_BY_PATH = {
     "github.com/hashicorp/go-plugin": [
         "gazelle:proto disable",
     ],
+    "github.com/lightstep/lightstep-tracer-common/golang/gogo": [
+        "gazelle:proto disable",
+    ],
     "github.com/prometheus/alertmanager": [
         "gazelle:proto disable",
     ],
@@ -102,6 +116,18 @@ DEFAULT_DIRECTIVES_BY_PATH = {
     "github.com/stackb/rules_proto": [
         "gazelle:go_naming_convention import",
     ],
+    "github.com/terraform-linters/tflint-plugin-sdk": [
+        "gazelle:proto disable",
+    ],
+    "github.com/thanos-io/thanos": [
+        "gazelle:proto disable",
+    ],
+    "github.com/weaveworks/common": [
+        "gazelle:proto disable",
+    ],
+    "go.chromium.org/luci": [
+        "gazelle:proto disable",
+    ],
     "google.golang.org/grpc": [
         "gazelle:proto disable",
     ],
@@ -111,12 +137,18 @@ DEFAULT_DIRECTIVES_BY_PATH = {
     "k8s.io/api": [
         "gazelle:proto disable",
     ],
+    "k8s.io/apiserver": [
+        "gazelle:proto disable",
+    ],
     "k8s.io/apiextensions-apiserver": [
         "gazelle:proto disable",
     ],
     "k8s.io/apimachinery": [
         "gazelle:go_generate_proto false",
         "gazelle:proto_import_prefix k8s.io/apimachinery",
+    ],
+    "k8s.io/cri-api": [
+        "gazelle:proto disable",
     ],
     "k8s.io/kubelet": [
         "gazelle:proto disable",

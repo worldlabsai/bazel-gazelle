@@ -3,7 +3,8 @@ matrix:
   platform:
     - ubuntu2204
     - macos
-  bazel: [6.x, 7.x]
+    - windows
+  bazel: [7.*, 8.*, 9.*]
   bcr_variant:
     - tests/bcr/go_work
     - tests/bcr/go_mod
@@ -13,16 +14,44 @@ tasks:
     platform: ubuntu2204
     build_flags:
     - "--noenable_bzlmod"
+    - "--enable_workspace"
     test_flags:
     - "--noenable_bzlmod"
+    - "--enable_workspace"
     build_targets:
-    - "..."
+    - "//..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
     run_targets:
     # Run Gazelle on repo to verify BUILD files are up-to-date. The output shouldn't differ
     # between platforms, so we only run it from one.
     - "//:gazelle_ci"
     test_targets:
     - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
+  ubuntu2204_race:
+    name: Ubuntu 22.04 with race detector
+    platform: ubuntu2204
+    build_flags:
+    - "--noenable_bzlmod"
+    - "--enable_workspace"
+    test_flags:
+    - "--noenable_bzlmod"
+    - "--enable_workspace"
+    - "--@io_bazel_rules_go//go/config:race"
+    build_targets:
+    - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
+    test_targets:
+    - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
   ubuntu2204_bzlmod:
     name: Ubuntu 22.04 with Bzlmod
     platform: ubuntu2204
@@ -37,6 +66,7 @@ tasks:
     - "-//internal:bazel_test"
     - "-//cmd/gazelle:gazelle_test"
   bcr_tests:
+    # Keep in sync with .bcr/presubmit.yml
     name: BCR test module
     platform: ${{ platform }}
     bazel: ${{ bazel }}
@@ -46,8 +76,10 @@ tasks:
     # Also verify -repo_config are generated correctly in gazelle.bash
     - rm pkg/BUILD.bazel proto/BUILD.bazel
     - touch pkg/BUILD.bazel proto/BUILD.bazel
-    - bazel run //:gazelle -- update pkg proto
     - bazel run //:gazelle -- pkg proto
+    - bazel run //:gazelle -- update pkg proto
+    # Verify that bazel mod tidy doesn't remove use_repos required to build and test.
+    - bazel mod tidy || true # Unsupported on Bazel 6
     build_targets:
     - "//..."
     - "//:gazelle"
@@ -55,32 +87,6 @@ tasks:
     # Specify these targets explicitly to verify that Gazelle generates them correctly.
     - "//pkg:pkg_test"
     - "//proto:proto_test"
-    - "//..."
-    - "@test_dep//..."
-  bcr_test_windows:
-    name: BCR test on Windows
-    platform: windows
-    bazel: ${{ bazel }}
-    working_directory: ${{ bcr_variant }}
-    shell_commands:
-    # Regenerate the BUILD file for the test module using Gazelle.
-    # Also verify -repo_config are generated correctly in gazelle.bash
-    - rm pkg/BUILD.bazel
-    - bazel run //:gazelle -- update pkg
-    - bazel run //:gazelle -- pkg
-    build_flags:
-    # Since go_sdk is platform-dependent, the lockfile will differ between
-    # platforms. We will skip the check on windows.
-    - "--lockfile_mode=update"
-    test_flags:
-    # See above.
-    - "--lockfile_mode=update"
-    build_targets:
-    - "//..."
-    - "//:gazelle"
-    test_targets:
-    # Specify this target explicitly to verify that Gazelle generated it correctly.
-    - "//pkg:pkg_test"
     - "//..."
     - "@test_dep//..."
   macos_arm64_bzlmod:
@@ -96,12 +102,20 @@ tasks:
     platform: macos_arm64
     build_flags:
     - "--noenable_bzlmod"
+    - "--enable_workspace"
     test_flags:
     - "--noenable_bzlmod"
+    - "--enable_workspace"
     build_targets:
     - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
     test_targets:
     - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
     # TODO: This is currently timing out due to infrastructure issues. We should
     # unblock development by temporarily disabling on MacOS.
     - "-//internal:bazel_test"
@@ -117,13 +131,21 @@ tasks:
     name: Mac OS with WORKSPACE
     platform: macos
     build_flags:
-    - "--noexperimental_enable_bzlmod"
+    - "--noenable_bzlmod"
+    - "--enable_workspace"
     test_flags:
-    - "--noexperimental_enable_bzlmod"
+    - "--noenable_bzlmod"
+    - "--enable_workspace"
     build_targets:
     - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
     test_targets:
     - "..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
   windows_bzlmod:
     name: Windows with Bzlmod
     platform: windows
@@ -150,13 +172,18 @@ tasks:
     name: Windows with WORKSPACE
     platform: windows
     build_flags:
-    - "--noexperimental_enable_bzlmod"
+    - "--noenable_bzlmod"
+    - "--enable_workspace"
     test_flags:
-    - "--noexperimental_enable_bzlmod"
+    - "--noenable_bzlmod"
+    - "--enable_workspace"
     build_targets:
     - "--"
     - "..."
     - "-//cmd/autogazelle/..."
+    # Docs no longer build in WORKSPACE mode, due to some hidden dependency in rules_cc.
+    - "-//docs:all"
+    - "-//tests/bzl_deps:all"
     test_targets:
     - "--"
     - "..."
@@ -173,17 +200,15 @@ tasks:
     - "-//tests:fix_mode_print0"
     - "-//tests:fix_mode_strict"
   incompatible:
-    name: Ubuntu 22.04 with WORKSPACE and --config=incompatible
+    name: Ubuntu 22.04 with --config=incompatible
     platform: ubuntu2204
     build_flags:
-      - "--noenable_bzlmod"
       - "--config=incompatible"
     build_targets:
       - "..."
     run_targets:
       - "//:gazelle_ci"
     test_flags:
-      - "--noenable_bzlmod"
       - "--config=incompatible"
     test_targets:
       - "..."

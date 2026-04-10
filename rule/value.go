@@ -1,4 +1,4 @@
-/* Copyright 2016 The Bazel Authors. All rights reserved.
+/* Copyright 2026 The Bazel Authors. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,10 +16,10 @@ limitations under the License.
 package rule
 
 import (
-	"fmt"
 	"log"
 	"reflect"
 	"sort"
+	"strconv"
 
 	bzl "github.com/bazelbuild/buildtools/build"
 )
@@ -33,8 +33,9 @@ type KeyValue struct {
 
 // GlobValue represents a Bazel glob expression.
 type GlobValue struct {
-	Patterns []string
-	Excludes []string
+	Patterns   []string
+	Excludes   []string
+	AllowEmpty bool
 }
 
 var _ BzlExprValue = (*GlobValue)(nil)
@@ -45,15 +46,93 @@ func (g GlobValue) BzlExpr() bzl.Expr {
 	if len(g.Excludes) > 0 {
 		excludesValue := ExprFromValue(g.Excludes)
 		globArgs = append(globArgs, &bzl.AssignExpr{
-			LHS: &bzl.LiteralExpr{Token: "exclude"},
+			LHS: &bzl.Ident{Name: "exclude"},
 			Op:  "=",
 			RHS: excludesValue,
 		})
 	}
+
+	if g.AllowEmpty {
+		globArgs = append(globArgs, &bzl.AssignExpr{
+			LHS: &bzl.Ident{Name: "allow_empty"},
+			Op:  "=",
+			RHS: ExprFromValue(true),
+		})
+	}
+
 	return &bzl.CallExpr{
-		X:    &bzl.LiteralExpr{Token: "glob"},
+		X:    &bzl.Ident{Name: "glob"},
 		List: globArgs,
 	}
+}
+
+// ParseGlobExpr detects whether the given expression is a call to the glob
+// function. If it is, ParseGlobExpr returns the glob's patterns and excludes
+// (if they are literal strings) and true. If not, ParseGlobExpr returns false.
+func ParseGlobExpr(e bzl.Expr) (GlobValue, bool) {
+	call, ok := e.(*bzl.CallExpr)
+	if !ok {
+		return GlobValue{}, false
+	}
+	callee, ok := call.X.(*bzl.Ident)
+	if !ok || callee.Name != "glob" {
+		return GlobValue{}, false
+	}
+	var glob GlobValue
+	parseStringsList := func(list *bzl.ListExpr) []string {
+		parsed := make([]string, 0, len(list.List))
+		for _, e := range list.List {
+			if str, ok := e.(*bzl.StringExpr); ok {
+				parsed = append(parsed, str.Value)
+			}
+		}
+		return parsed
+	}
+
+	// Positional arguments needs to be placed before named arguments, otherwise these are ambigious
+	allowPositionalArgs := true
+	for i, arg := range call.List {
+		if list, ok := arg.(*bzl.ListExpr); ok && allowPositionalArgs {
+			switch i {
+			case 0:
+				glob.Patterns = parseStringsList(list)
+			case 1:
+				glob.Excludes = parseStringsList(list)
+				// Last handled positional argument, no need to visit more
+				return glob, true
+			}
+			continue
+		}
+
+		kv, ok := arg.(*bzl.AssignExpr)
+		if !ok {
+			continue
+		}
+		allowPositionalArgs = false
+		key, ok := kv.LHS.(*bzl.Ident)
+		if !ok {
+			continue
+		}
+
+		if key.Name == "allow_empty" {
+			if ident, ok := kv.RHS.(*bzl.Ident); ok && ident.Name == "True" {
+				glob.AllowEmpty = true
+			}
+			continue
+		}
+
+		list, ok := kv.RHS.(*bzl.ListExpr)
+		if !ok {
+			continue
+		}
+		switch key.Name {
+		case "exclude":
+			glob.Excludes = parseStringsList(list)
+		case "include":
+			glob.Patterns = parseStringsList(list)
+		}
+	}
+	return glob, true
 }
 
 // BzlExprValue is implemented by types that have custom translations
@@ -131,9 +210,9 @@ func (s SelectStringListValue) BzlExpr() bzl.Expr {
 
 	args := make([]*bzl.KeyValueExpr, 0, len(s))
 	for _, key := range keys {
-		value := ExprFromValue(s[key])
-		if key != defaultKey {
-			value.(*bzl.ListExpr).ForceMultiLine = true
+		value := ExprFromValue(s[key]).(*bzl.ListExpr)
+		if key != defaultKey && len(value.List) > 0 {
+			value.ForceMultiLine = true
 		}
 		args = append(args, &bzl.KeyValueExpr{
 			Key:   &bzl.StringExpr{Value: key},
@@ -167,27 +246,53 @@ func ExprFromValue(val interface{}) bzl.Expr {
 		return be.BzlExpr()
 	}
 
+	// Fast paths for common types to avoid reflection overhead.
+	switch v := val.(type) {
+	// primitives
+	case string:
+		return &bzl.StringExpr{Value: v}
+	case bool:
+		if v {
+			return &bzl.Ident{Name: "True"}
+		}
+		return &bzl.Ident{Name: "False"}
+	case int:
+		return intLiteralExpr(int64(v))
+	case int8:
+		return intLiteralExpr(int64(v))
+	case int16:
+		return intLiteralExpr(int64(v))
+	case int32:
+		return intLiteralExpr(int64(v))
+	case int64:
+		return intLiteralExpr(v)
+	case uint:
+		return uintLiteralExpr(uint64(v))
+	case uint8:
+		return uintLiteralExpr(uint64(v))
+	case uint16:
+		return uintLiteralExpr(uint64(v))
+	case uint32:
+		return uintLiteralExpr(uint64(v))
+	case uint64:
+		return uintLiteralExpr(v)
+	case float32:
+		return floatLiteralExpr(float64(v))
+	case float64:
+		return floatLiteralExpr(v)
+
+	// common types of slices
+	case []string:
+		return stringSliceToExpr(v)
+	case []interface{}:
+		return interfaceSliceToExpr(v)
+	}
+
+	// Fallback to reflection for less common types
 	rv := reflect.ValueOf(val)
 	switch rv.Kind() {
-	case reflect.Bool:
-		tok := "False"
-		if rv.Bool() {
-			tok = "True"
-		}
-		return &bzl.LiteralExpr{Token: tok}
-
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return &bzl.LiteralExpr{Token: fmt.Sprintf("%d", val)}
-
-	case reflect.Float32, reflect.Float64:
-		return &bzl.LiteralExpr{Token: fmt.Sprintf("%f", val)}
-
-	case reflect.String:
-		return &bzl.StringExpr{Value: val.(string)}
-
 	case reflect.Slice, reflect.Array:
-		var list []bzl.Expr
+		list := make([]bzl.Expr, 0, rv.Len())
 		for i := 0; i < rv.Len(); i++ {
 			elem := ExprFromValue(rv.Index(i).Interface())
 			list = append(list, elem)
@@ -211,6 +316,34 @@ func ExprFromValue(val interface{}) bzl.Expr {
 
 	log.Panicf("type not supported: %T", val)
 	return nil
+}
+
+func intLiteralExpr(v int64) bzl.Expr {
+	return &bzl.LiteralExpr{Token: strconv.FormatInt(v, 10)}
+}
+
+func uintLiteralExpr(v uint64) bzl.Expr {
+	return &bzl.LiteralExpr{Token: strconv.FormatUint(v, 10)}
+}
+
+func floatLiteralExpr(v float64) bzl.Expr {
+	return &bzl.LiteralExpr{Token: strconv.FormatFloat(v, 'g', -1, 64)}
+}
+
+func stringSliceToExpr(strs []string) *bzl.ListExpr {
+	list := make([]bzl.Expr, len(strs))
+	for i, s := range strs {
+		list[i] = &bzl.StringExpr{Value: s}
+	}
+	return &bzl.ListExpr{List: list}
+}
+
+func interfaceSliceToExpr(vals []interface{}) *bzl.ListExpr {
+	list := make([]bzl.Expr, len(vals))
+	for i, v := range vals {
+		list[i] = ExprFromValue(v)
+	}
+	return &bzl.ListExpr{List: list}
 }
 
 func mapKeyString(k reflect.Value) string {

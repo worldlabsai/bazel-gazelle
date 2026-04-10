@@ -86,6 +86,11 @@ type Config struct {
 	// libraries in the workspace for dependency resolution
 	IndexLibraries bool
 
+	// When IndexLazy is true, Gazelle builds its index lazily, only reading
+	// specific directories indicated by the user or by extensions.
+	// When false, Gazelle indexes all directories.
+	IndexLazy bool
+
 	// KindMap maps from a kind name to its replacement. It provides a way for
 	// users to customize the kind of rules created by Gazelle, via
 	// # gazelle:map_kind.
@@ -206,15 +211,17 @@ var _ Configurer = (*CommonConfigurer)(nil)
 // CommonConfigurer handles language-agnostic command-line flags and directives,
 // i.e., those that apply to Config itself and not to Config.Exts.
 type CommonConfigurer struct {
-	repoRoot               string
-	indexLibraries, strict bool
-	langCsv                string
-	bzlmod                 bool
+	repoRoot                          string
+	indexLibraries, indexLazy, strict bool
+	langCsv                           string
+	bzlmod                            bool
 }
 
 func (cc *CommonConfigurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *Config) {
+	cc.indexLibraries = true
+	cc.indexLazy = false
 	fs.StringVar(&cc.repoRoot, "repo_root", "", "path to a directory which corresponds to go_prefix, otherwise gazelle searches for it.")
-	fs.BoolVar(&cc.indexLibraries, "index", true, "when true, gazelle will build an index of libraries in the workspace for dependency resolution")
+	fs.Var(indexFlag{indexLibraries: &cc.indexLibraries, indexLazy: &cc.indexLazy}, "index", "determines how Gazelle indexes library rules. 'all' means index all libraries in all repo directories. 'lazy' means specific directories, determined by extensions. 'none' means indexing is disabled.")
 	fs.BoolVar(&cc.strict, "strict", false, "when true, gazelle will exit with none-zero value for build file syntax errors or unknown directives")
 	fs.StringVar(&cc.langCsv, "lang", "", "if non-empty, process only these languages (e.g. \"go,proto\")")
 	fs.BoolVar(&cc.bzlmod, "bzlmod", false, "for internal usage only")
@@ -240,7 +247,12 @@ func (cc *CommonConfigurer) CheckFlags(fs *flag.FlagSet, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("%s: failed to resolve symlinks: %v", cc.repoRoot, err)
 	}
+	c.RepoName, err = extractRepositoryName(c.RepoRoot)
+	if err != nil {
+		return fmt.Errorf("failed to extract repository name: %v", err)
+	}
 	c.IndexLibraries = cc.indexLibraries
+	c.IndexLazy = cc.indexLazy
 	c.Strict = cc.strict
 	if len(cc.langCsv) > 0 {
 		c.Langs = strings.Split(cc.langCsv, ",")
@@ -305,4 +317,73 @@ func (cc *CommonConfigurer) Configure(c *Config, rel string, f *rule.File) {
 			}
 		}
 	}
+}
+
+type indexFlag struct {
+	indexLibraries, indexLazy *bool
+}
+
+func (f indexFlag) String() string {
+	indexLibraries := f.indexLibraries != nil && *f.indexLibraries
+	indexLazy := f.indexLazy != nil && *f.indexLazy
+	switch {
+	case indexLibraries && !indexLazy:
+		return "all"
+	case indexLibraries && indexLazy:
+		return "lazy"
+	default:
+		return "none"
+	}
+}
+
+func (f indexFlag) Set(s string) error {
+	switch s {
+	case "false", "none":
+		*f.indexLibraries = false
+		*f.indexLazy = false
+	case "lazy":
+		*f.indexLibraries = true
+		*f.indexLazy = true
+	case "true", "all":
+		*f.indexLibraries = true
+		*f.indexLazy = false
+	default:
+		return fmt.Errorf("invalid value for -index=%s; valid values are 'none', 'all', 'lazy'", s)
+	}
+	return nil
+}
+
+func (f indexFlag) IsBoolFlag() bool {
+	return true
+}
+
+func extractRepositoryName(repoRoot string) (string, error) {
+	name, err := module.ExtractModuleName(repoRoot)
+	if name != "" || err != nil {
+		return name, err
+	}
+
+	workspacePath := wspace.FindWORKSPACEFile(repoRoot)
+	workspace, _ := rule.LoadWorkspaceFile(workspacePath, "")
+	if workspace != nil {
+		return findWorkspaceName(workspace), nil
+	}
+	return "", nil
+}
+
+func findWorkspaceName(f *rule.File) string {
+	var name string
+	for _, r := range f.Rules {
+		if r.Kind() == "workspace" {
+			name = r.Name()
+			break
+		}
+	}
+	// HACK(bazelbuild/rules_go#2355, bazelbuild/rules_go#2387):
+	// We can't patch the WORKSPACE file with the correct name because Bazel
+	// writes it first; our patches won't apply.
+	if name == "com_google_googleapis" {
+		return "go_googleapis"
+	}
+	return name
 }
